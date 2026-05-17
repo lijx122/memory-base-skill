@@ -19,12 +19,11 @@
 memory-base/
 ├── README.md          # 安装说明，AI Agent 可读即可安装
 ├── SKILL.md           # skill 规范文档
-├── vec.py             # CLI入口，参数解析，命令路由
-├── semantic.py        # 语义信号（sentence-transformers）
-├── keyword.py         # 关键词信号（jieba + BM25）
-├── entity.py          # 实体信号（纯规则提取 + 多词表匹配）
-├── fusion.py          # 三路融合（归一化 + 加权合并）
-└── storage.py         # 文件IO + init + frontmatter解析
+├── vec.py             # CLI入口，参数解析，命令路由，init/read/list等直接操作
+├── semantic.py        # 语义信号（自包含：embedding + vectors.pkl读写）
+├── keyword.py         # 关键词信号（自包含：jieba分词 + bm25.json读写）
+├── entity.py          # 实体信号（自包含：正则提取 + 词表管理 + entities.json读写）
+└── fusion.py          # 三路融合（纯计算，接收三路结果做归一化+加权）
 ```
 
 安装流程（README中说明）：
@@ -35,50 +34,56 @@ memory-base/
 
 ## 1.1 模块职责与依赖关系
 
+五个文件，四个模块 + 一个入口。三个信号模块互相零依赖，各自完全自包含。
+
 ### vec.py — CLI入口
 - 参数解析（argparse），命令路由到对应模块
-- 自身不含任何业务逻辑
-- 不直接import重型依赖（sentence-transformers、jieba）
+- 直接实现以下轻量操作（不值得单独建模块）：
+  - init：创建目录结构、空索引文件、初始词表
+  - read：读取并输出条目全文
+  - list：遍历entries目录列出条目
+  - check：调用fusion做去重判断
+  - frontmatter解析：从markdown提取title/summary/env/stability
+  - entries文件遍历
+- search/index/remove/index-dir 命令路由到对应模块
 - Windows UTF-8 输出兼容在此处设置
+- 不直接import重型依赖（sentence-transformers、jieba）
 
-### semantic.py — 语义信号
+### semantic.py — 语义信号（完全自包含）
 - sentence-transformers 的 embedding 生成
-- 向量索引（index/vectors.pkl）读写
+- 向量索引（index/vectors.pkl）读写 — 自己管自己的索引IO
 - 余弦相似度计算
+- 陈旧索引清理（检查file_path是否存在）
 - 唯一持有 sentence-transformers 依赖的模块
-- 延迟import：模块被调用时才加载模型
+- 延迟import：被调用时才加载模型
+- 对外API：search / index_file / remove_file / rebuild
 
-### keyword.py — 关键词信号
+### keyword.py — 关键词信号（完全自包含）
 - jieba 分词
-- BM25 倒排索引（index/bm25.json）构建和查询
+- BM25 倒排索引（index/bm25.json）构建、查询、读写 — 自己管自己的索引IO
+- 陈旧索引清理
 - 唯一持有 jieba 依赖的模块
-- 延迟import：模块被调用时才加载jieba
+- 延迟import：被调用时才加载jieba
 - jieba缓存目录设为 index/jieba_cache/
+- 对外API：search / index_file / remove_file / rebuild
 
-### entity.py — 实体信号
+### entity.py — 实体信号（完全自包含）
 - 正则提取实体（强规则 + 弱规则）
-- 多词表加载和匹配（terms_tech.txt / terms_project.txt / terms_people.txt）
-- 实体索引（index/entities.json）读写
+- 多词表管理（加载、匹配、自动追加）— 自己管词表IO
+- 实体索引（index/entities.json）读写 — 自己管自己的索引IO
 - 实体类型分配（tech / project / people）
-- 弱规则提取的新实体自动追加词表（带 # auto 标记）
+- 陈旧索引清理
 - 纯标准库，无外部依赖
+- 对外API：search / index_file / remove_file / rebuild / list_entities / relate
 
-### fusion.py — 三信号融合
+### fusion.py — 三信号融合（纯计算）
 - 接收三个信号模块各自的候选集 List[(file_path, score)]
 - 各信号分数归一化到 [0, 1]
 - 加权合并：默认 semantic=0.5, bm25=0.3, entity=0.2
 - 同一 file_path 只保留最高综合分
 - 按综合分降序排序，返回 top N
 - 纯计算，无IO，无外部依赖
-
-### storage.py — 文件IO层
-- markdown frontmatter 解析（读 title / summary / env / stability）
-- 条目文件读写
-- 索引目录管理（创建、清理陈旧索引）
-- init 目录创建和初始词表生成
-- 词表文件读写
-- entries 文件遍历
-- 纯标准库，无外部依赖
+- 对外API：merge
 
 ## 1.2 模块间接口约定
 
@@ -86,17 +91,30 @@ memory-base/
 
 ```python
 # semantic.py / keyword.py / entity.py 各自实现以下接口
-def search(query: str, store: str | None, top: int) -> list[tuple[str, float]]:
-    """返回 [(file_path, score), ...] 按分数降序"""
+def search(query: str, store: str | None, top: int, base_dir: str) -> list[tuple[str, float]]:
+    """返回 [(file_path, score), ...] 按分数降序
+    base_dir: 项目根目录，用于定位索引文件"""
 
-def index_file(file_path: str, text: str) -> None:
-    """为单个文件建索引，text = title + summary + content"""
+def index_file(file_path: str, text: str, base_dir: str) -> None:
+    """为单个文件建索引，text = title + summary（语义）或 title + summary + content（关键词/实体）
+    各模块自己决定用text的哪些部分"""
 
-def remove_file(file_path: str) -> None:
-    """从索引中移除单个文件"""
+def remove_file(file_path: str, base_dir: str) -> None:
+    """从本模块的索引中移除单个文件"""
 
-def rebuild(store: str | None) -> dict:
-    """重建指定子库或全部索引，返回统计信息 {"count": N}"""
+def rebuild(store: str | None, entries: list[dict], base_dir: str) -> dict:
+    """重建索引。entries = [{"file_path": ..., "text": ...}, ...]
+    先清理陈旧索引，再重建。返回统计信息 {"count": N, "cleaned": M}"""
+```
+
+### entity.py 额外接口
+
+```python
+def list_entities(base_dir: str, filter_term: str | None = None) -> dict:
+    """返回实体索引内容。filter_term不为None时只返回该实体的关联条目"""
+
+def relate(file_path: str, base_dir: str) -> list[tuple[str, str, str]]:
+    """通过共享实体找关联条目。返回 [(entity_type, entity_name, related_file_path), ...]"""
 ```
 
 ### fusion 模块接口
@@ -110,68 +128,68 @@ def merge(
     """归一化+加权+去重+排序，返回 [(file_path, final_score), ...]"""
 ```
 
-### storage 模块接口
+### vec.py 内部函数（不是独立模块，不需要接口契约）
 
 ```python
+def parse_frontmatter(file_path: str) -> dict:
+    """从markdown提取 title/summary/env/stability"""
+
+def read_full(file_path: str) -> str:
+    """读取并返回完整文件内容"""
+
+def list_entries(store: str | None, base_dir: str) -> list[str]:
+    """遍历entries目录返回文件路径列表"""
+
 def init(base_dir: str) -> None:
-    """初始化目录结构和词表"""
-
-def read_entry(file_path: str) -> dict:
-    """返回 {"title": ..., "summary": ..., "content": ..., "env": ..., "stability": ...}"""
-
-def read_meta(file_path: str) -> dict:
-    """只读frontmatter，不读正文，返回 {"title": ..., "summary": ..., "env": ..., "stability": ...}"""
-
-def write_entry(file_path: str, content: str) -> None:
-    """写入条目文件"""
-
-def list_entries(store: str | None) -> list[str]:
-    """遍历指定子库的entries目录，返回文件路径列表"""
-
-def clean_stale(indexed_paths: list[str], store: str | None) -> list[str]:
-    """检查索引中的路径是否仍存在文件，返回已清理的路径列表"""
-
-def load_terms(term_type: str) -> list[str]:
-    """加载指定词表（tech/project/people），返回词列表"""
-
-def append_term(term_type: str, term: str, auto: bool = False) -> None:
-    """追加词到指定词表，auto=True时带 # auto 标记"""
+    """创建目录结构、空索引、初始词表"""
 ```
 
 ## 1.3 数据流
 
+### search 命令
 ```
-search "SQLite WAL" --top 5
+vec.py search "SQLite WAL" --top 5
     │
-    vec.py（解析参数）
+    vec.py（解析参数，确定base_dir）
     │
-    ├→ semantic.search("SQLite WAL") → [(file, score), ...]
-    ├→ keyword.search("SQLite WAL")  → [(file, score), ...]
-    ├→ entity.search("SQLite WAL")   → [(file, score), ...]
+    ├→ semantic.search("SQLite WAL", store, 20, base_dir) → [(file, score), ...]
+    ├→ keyword.search("SQLite WAL", store, 20, base_dir)  → [(file, score), ...]
+    ├→ entity.search("SQLite WAL", store, 20, base_dir)   → [(file, score), ...]
     │
     └→ fusion.merge(三路结果, weights=[0.5,0.3,0.2], top=5)
          │
-         └→ storage.read_meta(file_paths) → 拼接 [score] [store] title | summary | path
+         └→ vec.py: parse_frontmatter(file_paths) → 拼接 [score] [store] title | summary | path
+```
 
-index <file_path>
+### index 命令
+```
+vec.py index <file_path>
     │
-    vec.py（解析参数）
+    vec.py（解析参数，parse_frontmatter拿到title+summary，read_full拿到content）
     │
-    └→ storage.read_entry(file_path) → title, summary, content
-         │
-         ├→ semantic.index_file(file_path, title+summary)
-         ├→ keyword.index_file(file_path, title+summary+content)
-         └→ entity.index_file(file_path, title+summary+content)
+    ├→ semantic.index_file(file_path, title+summary, base_dir)
+    ├→ keyword.index_file(file_path, title+summary+content, base_dir)
+    └→ entity.index_file(file_path, title+summary+content, base_dir)
+```
 
-init
+### init 命令
+```
+vec.py init
     │
-    vec.py（解析参数）
+    vec.py（直接执行）
     │
-    └→ storage.init(base_dir)
-         │
-         ├→ 创建目录结构
-         ├→ 创建空索引文件
-         └→ 创建初始词表
+    ├→ 创建 index/, bug/entries/, knowledge/entries/ 目录
+    ├→ 创建空的 vectors.pkl, bm25.json, entities.json
+    └→ 创建 terms_tech.txt（预置）, terms_project.txt（空）, terms_people.txt（空）
+```
+
+### read / list / entities / relate 命令
+```
+vec.py read <file_path>     →  vec.py: read_full(file_path) → 输出
+vec.py list                 →  vec.py: list_entries(store) → 输出
+vec.py entities             →  entity.list_entities(base_dir) → 输出
+vec.py entities "SQLite"    →  entity.list_entities(base_dir, "SQLite") → 输出
+vec.py relate <file_path>   →  entity.relate(file_path, base_dir) → 输出
 ```
 
 ## 二、运行时目录结构（init后）
@@ -180,12 +198,11 @@ init
 ~/.claude/skills/memory-base/
 ├── SKILL.md                      # 仓库提供
 ├── README.md                     # 仓库提供
-├── vec.py                        # 仓库提供 - CLI入口
-├── semantic.py                   # 仓库提供 - 语义信号
-├── keyword.py                    # 仓库提供 - 关键词信号
-├── entity.py                     # 仓库提供 - 实体信号
-├── fusion.py                     # 仓库提供 - 三路融合
-├── storage.py                    # 仓库提供 - 文件IO
+├── vec.py                        # 仓库提供 - CLI入口 + init/read/list
+├── semantic.py                   # 仓库提供 - 语义信号（自包含）
+├── keyword.py                    # 仓库提供 - 关键词信号（自包含）
+├── entity.py                     # 仓库提供 - 实体信号（自包含）
+├── fusion.py                     # 仓库提供 - 三路融合（纯计算）
 ├── .gitignore                    # 仓库提供
 ├── index/                        # init 生成
 │   ├── vectors.pkl               # 向量索引（语义信号）
@@ -200,7 +217,7 @@ init
     └── entries/
 ```
 
-仓库只包含 .py + SKILL.md + README.md + .gitignore。index/、bug/、knowledge/ 由 init 生成，.gitignore排除。
+仓库只包含 .py文件 + SKILL.md + README.md + .gitignore（共7个文件）。index/、bug/、knowledge/ 由 init 生成，.gitignore排除。
 
 ### 新用户
 
