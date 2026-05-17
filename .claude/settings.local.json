@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python ~/.claude/skills/memory-base/vec.py search \"仓库 初始化 CLAUDE.md 代码库分析 README cursor copilot\" --top 5)"
-    ]
-  }
-}
