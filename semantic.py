@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import logging
 import math
+import os
 import pickle
+import warnings
 from pathlib import Path
 from typing import Any
 
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import numpy as np
+
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
+warnings.filterwarnings(
+    "ignore",
+    message=r"You are sending unauthenticated requests to the HF Hub\..*",
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_DIR = BASE_DIR / "index"
@@ -45,7 +59,11 @@ def _get_model():
 
 
 def _encode(text: str) -> list[float]:
-    vector = _get_model().encode(text or "", normalize_embeddings=True)
+    vector = _get_model().encode(
+        text or "",
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
     return np.asarray(vector, dtype=np.float32).tolist()
 
 

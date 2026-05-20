@@ -208,7 +208,12 @@ def cmd_search(args) -> None:
     if not results:
         print("[INFO] 索引库为空，请先执行 init 或 index-dir")
         return
-    for file_path, score in results:
+    filtered_results = [(file_path, score) for file_path, score in results if score >= args.min_score]
+    if not filtered_results:
+        best_score = results[0][1]
+        print(f"未找到相关条目（最高分 {best_score:.2f}，低于阈值 {args.min_score:.2f}）")
+        return
+    for file_path, score in filtered_results:
         meta = common.read_meta(file_path)
         store = _store_label(file_path, meta)
         title = meta.get("title") or Path(file_path).stem
@@ -360,6 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query", help="检索词")
     p_search.add_argument("--store", choices=["bug", "knowledge"], default=None, help="仅搜索指定子库")
     p_search.add_argument("--top", type=int, default=3, help="返回条数")
+    p_search.add_argument("--min-score", type=float, default=0.75, help="最低综合分阈值")
 
     p_check = sub.add_parser("check", help="写入前去重检查")
     p_check.add_argument("text", help="待检查的 title + summary 文本")
